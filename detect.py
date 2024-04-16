@@ -1,12 +1,20 @@
 import argparse
+import os
+import shutil
+import time
+from pathlib import Path
+import random
 
-from utils.datasets import *
-from utils.utils import *
+import cv2
+import numpy as np
+import torch
+
+from utils.datasets import LoadStreams, LoadImages
+from utils.utils import non_max_suppression, scale_coords, xyxy2xywh, check_img_size, torch_utils, plot_one_box
 
 
 def detect(save_img=False):
-    out, source, weights, view_img, save_txt, imgsz = \
-        opt.output, opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size
+    out, source, weights, view_img, save_txt, imgsz = opt.output, opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size
     webcam = source == '0' or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
 
     # Initialize
@@ -14,23 +22,14 @@ def detect(save_img=False):
     if os.path.exists(out):
         shutil.rmtree(out)  # delete output folder
     os.makedirs(out)  # make new output folder
+    os.makedirs(f'{out}/newcropped', exist_ok=True)  # make new folder for cropped plates
     half = device.type != 'cpu'  # half precision only supported on CUDA
 
     # Load model
-    google_utils.attempt_download(weights)
     model = torch.load(weights, map_location=device)['model'].float()  # load to FP32
-    # torch.save(torch.load(weights, map_location=device), weights)  # update model if SourceChangeWarning
-    # model.fuse()
     model.to(device).eval()
     if half:
         model.half()  # to FP16
-
-    # Second-stage classifier
-    classify = False
-    if classify:
-        modelc = torch_utils.load_classifier(name='resnet101', n=2)  # initialize
-        modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
-        modelc.to(device).eval()
 
     # Set Dataloader
     vid_path, vid_writer = None, None
@@ -66,10 +65,6 @@ def detect(save_img=False):
                                    fast=True, classes=opt.classes, agnostic=opt.agnostic_nms)
         t2 = torch_utils.time_synchronized()
 
-        # Apply Classifier
-        if classify:
-            pred = apply_classifier(pred, modelc, img, im0s)
-
         # Process detections
         for i, det in enumerate(pred):  # detections per image
             if webcam:  # batch_size >= 1
@@ -100,6 +95,15 @@ def detect(save_img=False):
                         label = '%s %.2f' % (names[int(cls)], conf)
                         plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
 
+                    # Crop the region outside the bounding box
+                    xmin, ymin, xmax, ymax = [int(x) for x in xyxy]
+                    im0_cropped = im0[ymin:ymax, xmin:xmax]
+
+                    # Save the cropped image in a new directory
+                    cropped_image_path = f'{out}/newcropped/cropped_{Path(p).stem}_{cls}_{i}.jpg'
+                    cv2.imwrite(cropped_image_path, im0_cropped)
+                    print(f'Cropped image saved: {cropped_image_path}')
+
             # Print time (inference + NMS)
             print('%sDone. (%.3fs)' % (s, t2 - t1))
 
@@ -127,15 +131,13 @@ def detect(save_img=False):
 
     if save_txt or save_img:
         print('Results saved to %s' % os.getcwd() + os.sep + out)
-        if platform == 'darwin':  # MacOS
-            os.system('open ' + save_path)
 
     print('Done. (%.3fs)' % (time.time() - t0))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='weights/yolov5s.pt', help='model.pt path')
+    parser.add_argument('--weights', type=str, default='weights/last.pt', help='model.pt path')
     parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
